@@ -1,0 +1,128 @@
+import numpy as np
+import random
+from scipy import stats
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.metrics import mean_squared_error
+import pandas as pd
+
+def main():
+    
+    # Read the VCF (genotype variants) file into a pandas DataFrame
+    vcf_data = pd.read_csv("/home/asr94/project/data/genotype_data/L2.3.IT/L2.3.IT_2.vcf", sep='\t', skiprows=1)
+    vcf_columns = vcf_data.columns
+    vcf_columns = vcf_columns[9:] # just the sample ids in a list
+
+    vcf_array = vcf_data.values # converting to numpy array
+
+    # Load the BED file into a NumPy array
+    bed_data = np.loadtxt("/home/asr94/project/data/expr_data/L2.3.IT/L2.3.IT_2.bed", dtype=str, delimiter='\t')
+    f = open("/gpfs/slayman/pi/gerstein/asr94/senior_thesis_proj/output/rf/L2.3.IT/L2.3.IT_2_perm_10.txt", "w")
+
+    corr_dict = {}
+    random.seed(62)
+    random_integers = random.sample(range(len(bed_data)), 1)
+    # make a linear regression model for every gene in this cell type's expression file
+    for i in random_integers:
+        gene = bed_data[i] # gene expression row
+        y = np.array(gene[6:], dtype=np.double) # just the expression values across all samples for that gene
+
+        x = find_cis_windows(int(gene[1]), vcf_array, vcf_columns) # will need to make this cis window of all the samples and snp dosages
+        # print(vcf_columns)
+        if (len(x) == 0): # if no snps for this gene
+            continue
+        
+        input = []
+        # for proper conversion into numpy array
+        for entry in x:
+            input.append(entry)
+
+        x = np.array(input, dtype=np.int8)
+
+        X_train, X_test, y_train, y_test = train_test_split(x, y, test_size=0.3, random_state=42)
+        # create an instance of the Random Forest regression model
+        model = RandomForestRegressor()
+
+        # Define hyperparameters to search
+        param_grid = {
+            'n_estimators': [int(x) for x in np.linspace(start=100, stop=1000, num=10)],  # Number of trees in random forest
+            'max_features': ['auto', 'sqrt'],  # Number of features to consider at every split
+            'max_depth': [int(x) for x in np.linspace(10, 110, num=11)],  # Maximum number of levels in tree
+            'min_samples_split': [2, 5, 10],  # Minimum number of samples required to split a node
+            'min_samples_leaf': [1, 2, 4],  # Minimum number of samples required at each leaf node
+            'bootstrap': [True, False]  # Method of selecting samples for training each tree
+        }
+
+        # Perform grid Search
+        grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=5, n_jobs=-1)
+        grid_search.fit(X_train, y_train)
+
+        # Get best parameters and best score
+        best_params = grid_search.best_params_
+        # best_score = random_search.best_score_
+
+        f.write(f"Best Parameters: {best_params}")
+        f.write('\n')
+        # f.write(f"Best Score (MSE): {-best_score}")  # negative because RandomizedSearchCV maximizes by default, so we need to negate it for MSE
+
+        # fit the model with best param architecture and then train it
+        # best_grid = random_search.best_estimator_
+        best_model = RandomForestRegressor(**best_params)
+        best_model.fit(X_train, y_train)
+        # model.fit(X_train, y_train)
+
+        # Predict on the test data
+        y_pred = best_model.predict(X_test)
+
+        corr = stats.pearsonr(y_test, y_pred)
+        corr_dict[gene[3]] = corr
+
+        # Evaluate the model
+        mse = mean_squared_error(y_test, y_pred)
+        f.write(gene[3] + ": MSE: " + str(mse) + " Pearson:  " + str(corr) + '\n')
+
+    sorted_corrs = sorted(corr_dict.items(), key=lambda x: x[1], reverse=True)
+    # Printing the top five key-value pairs (ranking genes for GWAS based on correlation)
+    f.write('\n')
+    for key, value in sorted_corrs[:5]:
+        f.write(f"{key}: {value}")
+        f.write('\n')
+
+    f.close()
+
+CIS_WINDOW = 1000000 # 1 million base pairs
+
+def find_cis_windows(TSS, vcf_array, vcf_columns):
+    start = TSS - CIS_WINDOW
+    end = TSS + CIS_WINDOW
+
+    snp_sample_mapping = {}
+    for i in range(len(vcf_array)):
+        snp_row = vcf_array[i]
+
+        if start <= int(snp_row[1]) and int(snp_row[1]) <= end: # within cis window of this gene!
+            # need to add all genotype dosages to dict, specific to each sample id.
+            sample_genotypes = snp_row[9:]
+            for j in range(len(sample_genotypes)):
+                # get corresponding patient id to use for storing in dict. 
+                sample_id = vcf_columns[j]
+                if sample_genotypes[j] == '0/0':
+                    dosage = 0
+
+                elif sample_genotypes[j] == '0/1' or sample_genotypes[j] == '1/0':
+                    dosage = 1
+
+                elif sample_genotypes[j] == '1/1':
+                    dosage = 2
+
+                if sample_id in snp_sample_mapping.keys():
+                    # append genotype dosage to existing list
+                    snp_sample_mapping[sample_id].append(dosage)
+                else: 
+                    # create new entry
+                    snp_sample_mapping[sample_id] = [dosage]
+
+    return snp_sample_mapping.values()
+
+if __name__ == "__main__":
+    main()
